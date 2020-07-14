@@ -42,6 +42,7 @@ rb_call_inits(void)
     CALL(Bignum);
     CALL(syserr);
     CALL(Array);
+    CALL(Deque);
     CALL(Hash);
     CALL(Struct);
     CALL(Regexp);

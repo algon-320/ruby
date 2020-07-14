@@ -553,6 +553,7 @@ typedef struct RVALUE {
 	struct RFloat  flonum;
 	struct RString string;
 	struct RArray  array;
+	struct RDeque  deque;
 	struct RRegexp regexp;
 	struct RHash   hash;
 	struct RData   data;
@@ -2700,6 +2701,9 @@ obj_free(rb_objspace_t *objspace, VALUE obj)
       case T_ARRAY:
         rb_ary_free(obj);
 	break;
+      case T_DEQUE:
+        rb_deq_free(obj);
+	break;
       case T_HASH:
 #if USE_DEBUG_COUNTER
         switch (RHASH_SIZE(obj)) {
@@ -3953,6 +3957,9 @@ obj_memsize_of(VALUE obj, int use_all_types)
       case T_ARRAY:
 	size += rb_ary_memsize(obj);
 	break;
+      case T_DEQUE:
+	size += rb_deq_memsize(obj);
+	break;
       case T_HASH:
         if (RHASH_AR_TABLE_P(obj)) {
             if (RHASH_AR_TABLE(obj) != NULL) {
@@ -4054,6 +4061,7 @@ type_sym(size_t type)
         COUNT_TYPE(T_STRING);
         COUNT_TYPE(T_REGEXP);
         COUNT_TYPE(T_ARRAY);
+        COUNT_TYPE(T_DEQUE);
         COUNT_TYPE(T_HASH);
         COUNT_TYPE(T_STRUCT);
         COUNT_TYPE(T_BIGNUM);
@@ -5492,6 +5500,30 @@ gc_mark_children(rb_objspace_t *objspace, VALUE obj)
                 }
             }
         }
+	break;
+
+      case T_DEQUE:
+	{
+	    unsigned long i, j;
+	    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(obj);
+            if (RDEQUE_DURING_INIT(obj)) {
+                break;
+            }
+
+	    VALUE **table = RDEQUE_TABLE_PTR(obj);
+	    long offset = RDEQUE_CHUNK_SIZE - header->first_chunk_size;
+	    for (i = 0; i < header->first_chunk_size; i++) {
+		gc_mark(objspace, table[header->first_chunk_idx][offset + i]);
+	    }
+	    for (i = header->first_chunk_idx + 1; i + 1 < header->last_chunk_idx; i++) {
+		for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
+		     gc_mark(objspace, table[i][j]);
+		}
+	    }
+	    for (i = 0; i < header->last_chunk_size; i++) {
+		gc_mark(objspace, table[header->last_chunk_idx][i]);
+	    }
+	}
 	break;
 
       case T_HASH:
@@ -7611,6 +7643,7 @@ gc_is_moveable_obj(rb_objspace_t *objspace, VALUE obj)
       case T_FLOAT:
       case T_IMEMO:
       case T_ARRAY:
+      case T_DEQUE:
       case T_BIGNUM:
       case T_ICLASS:
       case T_MODULE:
@@ -7941,6 +7974,29 @@ gc_ref_update_array(rb_objspace_t * objspace, VALUE v)
         VALUE *ptr = (VALUE *)RARRAY_CONST_PTR_TRANSIENT(v);
         for (i = 0; i < len; i++) {
             UPDATE_IF_MOVED(objspace, ptr[i]);
+        }
+    }
+}
+
+
+static void
+gc_ref_update_deque(rb_objspace_t * objspace, VALUE v)
+{
+    if (RDEQUE_LEN(v) > 0) {
+        unsigned long i, j;
+        struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(v);
+        VALUE **table =RDEQUE_TABLE_PTR(v);
+        long offset = RDEQUE_CHUNK_SIZE - header->first_chunk_size;
+        for (i = 0; i < header->first_chunk_size; i++) {
+            UPDATE_IF_MOVED(objspace, table[header->first_chunk_idx][offset + i]);
+        }
+        for (i = header->first_chunk_idx + 1; i + 1 < header->last_chunk_idx; i++) {
+            for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
+                UPDATE_IF_MOVED(objspace, table[i][j]);
+            }
+        }
+        for (i = 0; i < header->last_chunk_size; i++) {
+            UPDATE_IF_MOVED(objspace, table[header->last_chunk_idx][i]);
         }
     }
 }
@@ -8357,6 +8413,10 @@ gc_update_object_references(rb_objspace_t *objspace, VALUE obj)
         else {
             gc_ref_update_array(objspace, obj);
         }
+        break;
+
+      case T_DEQUE:
+        gc_ref_update_deque(objspace, obj);
         break;
 
       case T_HASH:
@@ -11460,6 +11520,7 @@ type_name(int type, VALUE obj)
 	    TYPE_NAME(T_STRING);
 	    TYPE_NAME(T_REGEXP);
 	    TYPE_NAME(T_ARRAY);
+	    TYPE_NAME(T_DEQUE);
 	    TYPE_NAME(T_HASH);
 	    TYPE_NAME(T_STRUCT);
 	    TYPE_NAME(T_BIGNUM);
@@ -11620,6 +11681,10 @@ rb_raw_obj_info(char *buff, const int buff_size, VALUE obj)
                          (void *)RARRAY_CONST_PTR_TRANSIENT(obj)));
             }
 	    break;
+	  case T_DEQUE: {
+	    APPENDF((BUFF_ARGS, ">[...]< (len: %ld)", RDEQUE_LEN(obj)));
+	    break;
+	  }
 	  case T_STRING: {
             APPENDF((BUFF_ARGS, "%s", RSTRING_PTR(obj)));
 	    break;

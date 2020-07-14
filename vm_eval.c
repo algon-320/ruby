@@ -551,6 +551,7 @@ rb_type_str(enum ruby_value_type type)
       case type_case(T_STRING);
       case type_case(T_REGEXP);
       case type_case(T_ARRAY);
+      case type_case(T_DEQUE);
       case type_case(T_HASH);
       case type_case(T_STRUCT);
       case type_case(T_BIGNUM);

@@ -57,6 +57,7 @@
 #define T_CLASS    RUBY_T_CLASS
 #define T_COMPLEX  RUBY_T_COMPLEX
 #define T_DATA     RUBY_T_DATA
+#define T_DEQUE    RUBY_T_DEQUE
 #define T_FALSE    RUBY_T_FALSE
 #define T_FILE     RUBY_T_FILE
 #define T_FIXNUM   RUBY_T_FIXNUM
@@ -132,6 +133,7 @@ ruby_value_type {
     RUBY_T_SYMBOL   = 0x14, /**< @see struct ::RSymbol */
     RUBY_T_FIXNUM   = 0x15, /**< Integers formerly known as Fixnums. */
     RUBY_T_UNDEF    = 0x16, /**< @see ::RUBY_Qundef */
+    RUBY_T_DEQUE    = 0x17, /**< @see struct ::RDeque */
 
     RUBY_T_IMEMO    = 0x1a, /**< @see struct ::RIMemo */
     RUBY_T_NODE     = 0x1b, /**< @see struct ::RNode */

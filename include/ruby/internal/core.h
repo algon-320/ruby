@@ -21,6 +21,7 @@
  * @brief      Core data structures, definitions and manupulations.
  */
 #include "ruby/internal/core/rarray.h"
+#include "ruby/internal/core/rdeque.h"
 #include "ruby/internal/core/rbasic.h"
 #include "ruby/internal/core/rbignum.h"
 #include "ruby/internal/core/rclass.h"
