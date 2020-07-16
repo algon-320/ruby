@@ -5505,23 +5505,26 @@ gc_mark_children(rb_objspace_t *objspace, VALUE obj)
       case T_DEQUE:
 	{
 	    unsigned long i, j;
-	    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(obj);
-            if (RDEQUE_DURING_INIT(obj)) {
+	    struct RDequeChunkTable *table = RDEQUE_CHUNK_TABLE(obj);
+            if (table == NULL) {
                 break;
             }
-
-	    VALUE **table = RDEQUE_TABLE_PTR(obj);
-	    long offset = RDEQUE_CHUNK_SIZE - header->first_chunk_size;
-	    for (i = 0; i < header->first_chunk_size; i++) {
-		gc_mark(objspace, table[header->first_chunk_idx][offset + i]);
-	    }
-	    for (i = header->first_chunk_idx + 1; i + 1 < header->last_chunk_idx; i++) {
-		for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
-		     gc_mark(objspace, table[i][j]);
+	    if (RDEQUE_TABLE_USED_CHUNK_NUM(obj) == 1) {
+		for (i = table->front + 1; i + 1 < table->back; i++) {
+		    gc_mark(objspace, table->chunks[table->first_chunk_idx][i]);
 		}
-	    }
-	    for (i = 0; i < header->last_chunk_size; i++) {
-		gc_mark(objspace, table[header->last_chunk_idx][i]);
+	    } else {
+		for (i = table->front + 1; i < RDEQUE_CHUNK_SIZE; i++) {
+		    gc_mark(objspace, table->chunks[table->first_chunk_idx][i]);
+		}
+		for (i = table->first_chunk_idx + 1; i + 1 < table->last_chunk_idx; i++) {
+		    for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
+			gc_mark(objspace, table->chunks[i][j]);
+		    }
+		}
+		for (i = 0; i + 1 < table->back; i++) {
+		    gc_mark(objspace, table->chunks[table->last_chunk_idx][i]);
+		}
 	    }
 	}
 	break;
@@ -7984,19 +7987,24 @@ gc_ref_update_deque(rb_objspace_t * objspace, VALUE v)
 {
     if (RDEQUE_LEN(v) > 0) {
         unsigned long i, j;
-        struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(v);
-        VALUE **table =RDEQUE_TABLE_PTR(v);
-        long offset = RDEQUE_CHUNK_SIZE - header->first_chunk_size;
-        for (i = 0; i < header->first_chunk_size; i++) {
-            UPDATE_IF_MOVED(objspace, table[header->first_chunk_idx][offset + i]);
-        }
-        for (i = header->first_chunk_idx + 1; i + 1 < header->last_chunk_idx; i++) {
-            for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
-                UPDATE_IF_MOVED(objspace, table[i][j]);
+        struct RDequeChunkTable *table = RDEQUE_CHUNK_TABLE(v);
+        if (table == NULL) return;
+        if (RDEQUE_TABLE_USED_CHUNK_NUM(v) == 1) {
+            for (i = table->front + 1; i + 1 < table->back; i++) {
+                UPDATE_IF_MOVED(objspace, table->chunks[table->first_chunk_idx][i]);
             }
-        }
-        for (i = 0; i < header->last_chunk_size; i++) {
-            UPDATE_IF_MOVED(objspace, table[header->last_chunk_idx][i]);
+        } else {
+            for (i = table->front + 1; i < RDEQUE_CHUNK_SIZE; i++) {
+                UPDATE_IF_MOVED(objspace, table->chunks[table->first_chunk_idx][i]);
+            }
+            for (i = table->first_chunk_idx + 1; i + 1 < table->last_chunk_idx; i++) {
+                for (j = 0; j < RDEQUE_CHUNK_SIZE; j++) {
+                    UPDATE_IF_MOVED(objspace, table->chunks[i][j]);
+                }
+            }
+            for (i = 0; i + 1 < table->back; i++) {
+                UPDATE_IF_MOVED(objspace, table->chunks[table->last_chunk_idx][i]);
+            }
         }
     }
 }

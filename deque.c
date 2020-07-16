@@ -12,17 +12,18 @@
 #endif
 #include "ruby_assert.h"
 
-#define DEQ_MAX_SIZE (LONG_MAX / (int)sizeof(VALUE))
-
 #define DEQ_LEN(deq) (RDEQUE(deq)->len)
 #define DEQ_TABLE_CAP(deq) (RDEQUE(deq)->table_cap)
-#define DEQ_TABLE_HEADER_PTR(deq) (RDEQUE(deq)->ptr)
+#define DEQ_TABLE(deq) (RDEQUE(deq)->table)
+
+static inline unsigned long
+deq_chunk_table_size_bytes(unsigned long cap)
+{
+    return sizeof(struct RDequeChunkTable) + sizeof(VALUE*) * cap;
+}
 
 static void
 deq_heap_free(VALUE deq);
-
-// -------------------------------------------------------------------------
-
 void
 rb_deq_free(VALUE deq)
 {
@@ -32,10 +33,9 @@ rb_deq_free(VALUE deq)
 RUBY_FUNC_EXPORTED size_t
 rb_deq_memsize(VALUE deq)
 {
-    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(deq);
-    long used_chunk = header->last_chunk_idx - header->first_chunk_idx + 1;
-    return RDEQUE_CHUNK_TABLE_SIZE(DEQ_TABLE_CAP(deq))
-            + used_chunk * RDEQUE_CHUNK_SIZE * sizeof(VALUE);
+    if (DEQ_TABLE(deq) == NULL) return 0;
+    return deq_chunk_table_size_bytes(DEQ_TABLE_CAP(deq))
+            + RDEQUE_TABLE_USED_CHUNK_NUM(deq) * RDEQUE_CHUNK_SIZE * sizeof(VALUE);
 }
 
 static inline void
@@ -47,12 +47,13 @@ memfill(register VALUE *mem, register long size, register VALUE val)
 }
 
 static inline unsigned long
-deq_calc_new_table_capa(VALUE deq)
+deq_calc_new_table_cap(VALUE deq)
 {
-    unsigned long old_capa = RDEQUE_TABLE_CAP(deq);
+    unsigned long old_capa = DEQ_TABLE_CAP(deq);
     unsigned long new_capa = old_capa * 2;
-    if (new_capa > RDEQUE_MAX_LEN / RDEQUE_CHUNK_SIZE) {
-        new_capa = RDEQUE_MAX_LEN / RDEQUE_CHUNK_SIZE;
+    if (old_capa == 1) new_capa = 3;
+    if (new_capa > RDEQUE_MAX_SIZE / RDEQUE_CHUNK_SIZE) {
+        new_capa = RDEQUE_MAX_SIZE / RDEQUE_CHUNK_SIZE;
     }
     return new_capa;
 }
@@ -69,20 +70,20 @@ empty_deq_alloc(VALUE klass)
     NEWOBJ_OF(deq, struct RDeque, klass, T_DEQUE);
     RDEQUE(deq)->len = 0;
     RDEQUE(deq)->table_cap = 0;
-    RDEQUE(deq)->ptr = NULL;
+    RDEQUE(deq)->table = NULL;
     return (VALUE)deq;
 }
 
-static VALUE *
+static inline VALUE *
 deq_heap_alloc_chunk()
 {
     return ALLOC_N(VALUE, RDEQUE_CHUNK_SIZE);
 }
 
-static struct RDequeChunkTableHeader *
-deq_heap_alloc_table_with_header(long cap)
+static inline struct RDequeChunkTable *
+deq_heap_alloc_table(long cap)
 {
-    return (struct RDequeChunkTableHeader *)ALLOC_N(VALUE, RDEQUE_CHUNK_TABLE_SIZE(cap) / sizeof(VALUE));
+    return (struct RDequeChunkTable *)ALLOC_N(VALUE, deq_chunk_table_size_bytes(cap) / sizeof(VALUE));
 }
 
 static void
@@ -90,42 +91,37 @@ deq_heap_realloc_table(VALUE deq, long new_cap)
 {
     assert(!OBJ_FROZEN(deq));
     long old_cap = DEQ_TABLE_CAP(deq);
-    struct RDequeChunkTableHeader *new_header, *old_header;
-    old_header = DEQ_TABLE_HEADER_PTR(deq);
-    new_header = (struct RDequeChunkTableHeader *)ALLOC_N(VALUE, RDEQUE_CHUNK_TABLE_SIZE(new_cap) / sizeof(VALUE));
-    VALUE **new_table_ptr = RDEQUE_TABLE_FROM_HEADER(new_header);
-    long used_chunk = old_header->last_chunk_idx - old_header->first_chunk_idx + 1;
-    
+    struct RDequeChunkTable *old_table = DEQ_TABLE(deq);
+    long used_chunk = RDEQUE_TABLE_USED_CHUNK_NUM(deq);
+    struct RDequeChunkTable *new_table = deq_heap_alloc_table(new_cap);
+
     // copy header
-    *new_header = *old_header;
+    *new_table = *old_table;
+    long offset = (new_cap - used_chunk) / 2 - old_table->first_chunk_idx;  // centering
+    MEMCPY(new_table->chunks + offset, DEQ_TABLE(deq)->chunks, VALUE, old_cap);
 
-    // copy table contents
-    long offset = (new_cap - used_chunk) / 2 - old_header->first_chunk_idx;  // centering
-    MEMCPY(new_table_ptr + offset, RDEQUE_TABLE_PTR(deq), VALUE, old_cap);
-
-    new_header->first_chunk_idx += offset;
-    new_header->last_chunk_idx += offset;
+    new_table->first_chunk_idx += offset;
+    new_table->last_chunk_idx += offset;
 
     DEQ_TABLE_CAP(deq) = new_cap;
-    DEQ_TABLE_HEADER_PTR(deq) = new_header;
-    ruby_sized_xfree(old_header, RDEQUE_CHUNK_TABLE_SIZE(old_cap));
+    DEQ_TABLE(deq) = new_table;
+    ruby_sized_xfree(old_table, deq_chunk_table_size_bytes(old_cap));
 }
 
 static void
 deq_heap_free(VALUE deq)
 {
-    struct RDequeChunkTableHeader *table_header = RDEQUE_TABLE_HEADER_PTR(deq);
-    long first = table_header->first_chunk_idx;
-    long last = table_header->last_chunk_idx;
-    for (long i = first; i <= last; i++) {
-        ruby_sized_xfree((void *)RDEQUE_CHUNK_PTR(deq, i), RDEQUE_CHUNK_SIZE * sizeof(VALUE));
-        RDEQUE_TABLE_PTR(deq)[i] = (VALUE *)NULL;
-    }
-    ruby_sized_xfree(table_header, RDEQUE_CHUNK_TABLE_SIZE(RDEQUE_TABLE_CAP(deq)));
-
+    long len = DEQ_LEN(deq);
+    long table_cap = DEQ_TABLE_CAP(deq);
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
     DEQ_LEN(deq) = 0;
     DEQ_TABLE_CAP(deq) = 0;
-    DEQ_TABLE_HEADER_PTR(deq) = (struct RDequeChunkTableHeader *)NULL;
+    DEQ_TABLE(deq) = (struct RDequeChunkTable *)NULL;
+    for (unsigned long i = table->first_chunk_idx; i <= table->first_chunk_idx; i++) {
+        ruby_sized_xfree((void *)table->chunks[i], len * sizeof(VALUE));
+        table->chunks[i] = (VALUE *)NULL;
+    }
+    ruby_sized_xfree(table, deq_chunk_table_size_bytes(table_cap));
 }
 
 static VALUE
@@ -146,76 +142,68 @@ rb_deq_initialize(int argc, VALUE *argv, VALUE deq)
 
     long len = NUM2LONG(size);
     if (len < 0) rb_raise(rb_eArgError, "negative size");
-    if (len > DEQ_MAX_SIZE) rb_raise(rb_eArgError, "too large deque");
+    if (len > RDEQUE_MAX_SIZE) rb_raise(rb_eArgError, "too large deque");
 
-    if (DEQ_TABLE_HEADER_PTR(deq) != NULL) {
+    if (DEQ_TABLE(deq) != NULL) {
         deq_heap_free(deq);
     }
 
-    long top_half = len / 2;
-    long top_half_cap = (top_half + RDEQUE_CHUNK_SIZE - 1) / RDEQUE_CHUNK_SIZE;
-    if (top_half_cap == 0) top_half_cap = 1;
-    long bot_half = len - top_half;
-    long bot_half_cap = (bot_half + RDEQUE_CHUNK_SIZE - 1) / RDEQUE_CHUNK_SIZE;
-    if (bot_half_cap == 0) bot_half_cap = 1;
+    long slot_cap = len + 2;
+    long first_half = slot_cap / 2;
+    long second_half = slot_cap - first_half;
+    long chunk_num = (slot_cap + RDEQUE_CHUNK_SIZE - 1) / RDEQUE_CHUNK_SIZE;
+    long center = chunk_num * RDEQUE_CHUNK_SIZE / 2;
+    // [begin, end)
+    long begin = center - first_half;
+    long end = center + second_half;
+
+    // allocate chunk table
+    struct RDequeChunkTable *table = deq_heap_alloc_table(chunk_num);
+    for (long i = 0; i < chunk_num; i++) {
+        table->chunks[i] = deq_heap_alloc_chunk();
+    }
     
-    long table_cap = top_half_cap + bot_half_cap;
-    struct RDequeChunkTableHeader *new_header;
-    new_header = deq_heap_alloc_table_with_header(table_cap);
-    
-    VALUE **table = RDEQUE_TABLE_FROM_HEADER(new_header);
-    long rem;
-
-    for (long i = 0; i < table_cap; i++) {
-        table[i] = deq_heap_alloc_chunk();
+    if (chunk_num == 1) {
+        memfill(table->chunks[0] + begin, end - begin, fill_val);
+        table->front = begin;
+        table->back = end - 1;
+        table->first_chunk_idx = table->last_chunk_idx = 0;
+    } else {
+        // greater than or equals to 3
+        memfill(table->chunks[0] + begin, RDEQUE_CHUNK_SIZE - begin, fill_val);
+        for (long i = 1; i + 1 < chunk_num; i++) {
+            memfill(table->chunks[i], RDEQUE_CHUNK_SIZE, fill_val);
+        }
+        memfill(table->chunks[chunk_num - 1], (end - 1) % RDEQUE_CHUNK_SIZE, fill_val);
+        table->front = begin;
+        table->back = (end - 1) % RDEQUE_CHUNK_SIZE;
+        table->first_chunk_idx = 0;
+        table->last_chunk_idx = (end - 1) / RDEQUE_CHUNK_SIZE;
     }
-
-    // initialize top half
-    rem = top_half % RDEQUE_CHUNK_SIZE;
-    memfill(table[0] + (RDEQUE_CHUNK_SIZE - rem), rem, fill_val);
-    for (long i = 1; i < top_half_cap; i++) {
-        memfill(table[i], RDEQUE_CHUNK_SIZE, fill_val);
-    }
-    new_header->first_chunk_idx = 0;
-    new_header->first_chunk_size = rem;
-
-    // initialize bottom half
-    long bot_begin = top_half_cap;
-    for (long i = 0; i + 1 < bot_half_cap; i++) {
-        memfill(table[bot_begin + i], RDEQUE_CHUNK_SIZE, fill_val);
-    }
-    rem = bot_half % RDEQUE_CHUNK_SIZE;
-    memfill(table[bot_begin + bot_half_cap - 1], rem, fill_val);
-    new_header->last_chunk_idx = bot_begin + bot_half_cap - 1;
-    new_header->last_chunk_size = rem;
-
     DEQ_LEN(deq) = len;
-    DEQ_TABLE_CAP(deq) = table_cap;
-    DEQ_TABLE_HEADER_PTR(deq) = new_header;
+    DEQ_TABLE_CAP(deq) = chunk_num;
+    DEQ_TABLE(deq) = table;
     return deq;
 }
 
 static inline VALUE *
 rb_deq_ref_ptr(VALUE deq, long idx)
 {
-    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(deq);
-    long total_size = DEQ_LEN(deq);
-    if (idx >= total_size || idx < -total_size) {
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
+    long len = DEQ_LEN(deq);
+    if (idx >= len || idx < -len) {
         return NULL; // out of range
     }
     if (idx < 0) {
-        idx += total_size;
+        idx += len;
     }
 
-    if ((unsigned long)idx < header->first_chunk_size) {
-        long space = RDEQUE_CHUNK_SIZE - header->first_chunk_size;
-        return &RDEQUE_CHUNK_PTR(deq, header->first_chunk_idx)[space + idx];
+    idx += table->front + 1;
+    if (idx < RDEQUE_CHUNK_SIZE) {
+        return &table->chunks[table->first_chunk_idx][idx];
+    } else {
+        return &table->chunks[table->first_chunk_idx + idx / RDEQUE_CHUNK_SIZE][idx % RDEQUE_CHUNK_SIZE];
     }
-
-    idx -= header->first_chunk_size;
-    long chunk = header->first_chunk_idx + 1 + idx / RDEQUE_CHUNK_SIZE;
-    idx %= RDEQUE_CHUNK_SIZE;
-    return &RDEQUE_CHUNK_PTR(deq, chunk)[idx];
 }
 static inline VALUE
 rb_deq_ref(VALUE deq, long idx)
@@ -234,6 +222,7 @@ rb_deq_at(VALUE deq, VALUE offset)
 static VALUE
 rb_deq_at_write(VALUE deq, VALUE offset, VALUE value)
 {
+    rb_deq_modify_check(deq);
     VALUE *ptr = rb_deq_ref_ptr(deq, NUM2LONG(offset));
     if (ptr) {
         *ptr = value;
@@ -278,56 +267,42 @@ static VALUE
 rb_deq_push_back(VALUE deq, VALUE item)
 {
     rb_deq_modify_check(deq);
-    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(deq);
-    VALUE **table;
-    if (header->last_chunk_size == RDEQUE_CHUNK_SIZE) {
-        VALUE *new_chunk = deq_heap_alloc_chunk();
-        if (RDEQUE_TABLE_CAP(deq) == header->last_chunk_idx + 1) {
-            long new_capa = deq_calc_new_table_capa(deq);
-            deq_heap_realloc_table(deq, new_capa);
-            header = RDEQUE_TABLE_HEADER_PTR(deq);
-        }
-        assert(RDEQUE_TABLE_CAP(deq) > header->last_chunk_idx + 1);
-        table = RDEQUE_TABLE_PTR(deq);
-        table[header->last_chunk_idx + 1] = new_chunk;
-        header->last_chunk_idx += 1;
-        header->last_chunk_size = 0;
-    }
-    assert(header->last_chunk_size + 1 < RDEQUE_CHUNK_SIZE);
-    table = RDEQUE_TABLE_PTR(deq);
-    long chunk = header->last_chunk_idx;
-    long idx = header->last_chunk_size;
-    table[chunk][idx] = item;
-    header->last_chunk_size += 1;
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
+    table->chunks[table->last_chunk_idx][table->back] = item;
     DEQ_LEN(deq) += 1;
+    if (table->back + 1 == RDEQUE_CHUNK_SIZE) {
+        if (table->last_chunk_idx + 1 == DEQ_TABLE_CAP(deq)) {
+            long new_cap = deq_calc_new_table_cap(deq);
+            deq_heap_realloc_table(deq, new_cap);
+            table = DEQ_TABLE(deq);
+        }
+        table->last_chunk_idx += 1;
+        table->back = 0;
+        table->chunks[table->last_chunk_idx] = deq_heap_alloc_chunk();
+    } else {
+        table->back += 1;
+    }
     return deq;
 }
 static VALUE
 rb_deq_push_front(VALUE deq, VALUE item)
 {
     rb_deq_modify_check(deq);
-    struct RDequeChunkTableHeader *header = RDEQUE_TABLE_HEADER_PTR(deq);
-    VALUE **table;
-    if (header->first_chunk_size == RDEQUE_CHUNK_SIZE) {
-        VALUE *new_chunk = deq_heap_alloc_chunk();
-        if (header->first_chunk_idx == 0) {
-            long new_capa = deq_calc_new_table_capa(deq);
-            deq_heap_realloc_table(deq, new_capa);
-            header = RDEQUE_TABLE_HEADER_PTR(deq);
-        }
-        assert(header->first_chunk_idx >= 1);
-        table = RDEQUE_TABLE_PTR(deq);
-        table[header->first_chunk_idx - 1] = new_chunk;
-        header->first_chunk_idx -= 1;
-        header->first_chunk_size = 0;
-    }
-    assert(header->first_chunk_size + 1 < RDEQUE_CHUNK_SIZE);
-    table = RDEQUE_TABLE_PTR(deq);
-    long chunk = header->first_chunk_idx;
-    long idx = RDEQUE_CHUNK_SIZE - header->first_chunk_size - 1;
-    table[chunk][idx] = item;
-    header->first_chunk_size += 1;
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
+    table->chunks[table->first_chunk_idx][table->front] = item;
     DEQ_LEN(deq) += 1;
+    if (table->front == 0) {
+        if (table->first_chunk_idx == 0) {
+            long new_cap = deq_calc_new_table_cap(deq);
+            deq_heap_realloc_table(deq, new_cap);
+            table = DEQ_TABLE(deq);
+        }
+        table->first_chunk_idx -= 1;
+        table->front = RDEQUE_CHUNK_SIZE - 1;
+        table->chunks[table->first_chunk_idx] = deq_heap_alloc_chunk();
+    } else {
+        table->front -= 1;
+    }
     return deq;
 }
 
