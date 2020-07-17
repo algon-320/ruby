@@ -306,6 +306,37 @@ rb_deq_push_front(VALUE deq, VALUE item)
     return deq;
 }
 
+static VALUE
+rb_deq_pop_back(VALUE deq)
+{
+    rb_deq_modify_check(deq);
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
+    DEQ_LEN(deq) -= 1;
+    if (table->back == 0) {
+        // TODO: shrink table
+        table->last_chunk_idx -= 1;
+        table->back = RDEQUE_CHUNK_SIZE - 1;
+    } else {
+        table->back -= 1;
+    }
+    return table->chunks[table->last_chunk_idx][table->back];
+}
+static VALUE
+rb_deq_pop_front(VALUE deq)
+{
+    rb_deq_modify_check(deq);
+    struct RDequeChunkTable *table = DEQ_TABLE(deq);
+    DEQ_LEN(deq) -= 1;
+    if (table->front == RDEQUE_CHUNK_SIZE - 1) {
+        // TODO: shrink table
+        table->first_chunk_idx += 1;
+        table->front = 0;
+    } else {
+        table->front += 1;
+    }
+    return table->chunks[table->first_chunk_idx][table->front];
+}
+
 void
 Init_Deque(void)
 {
@@ -316,10 +347,17 @@ Init_Deque(void)
     rb_define_alias(rb_cDeque,  "to_s", "inspect");
     rb_define_method(rb_cDeque, "length", rb_deq_length, 0);
     rb_define_alias(rb_cDeque,  "size", "length");
+    
     rb_define_method(rb_cDeque, "push_back", rb_deq_push_back, 1);
     rb_define_method(rb_cDeque, "push_front", rb_deq_push_front, 1);
     rb_define_alias(rb_cDeque,  "push", "push_back");
     rb_define_alias(rb_cDeque,  "unshift", "push_front");
+    
+    rb_define_method(rb_cDeque, "pop_back", rb_deq_pop_back, 0);
+    rb_define_method(rb_cDeque, "pop_front", rb_deq_pop_front, 0);
+    rb_define_alias(rb_cDeque,  "pop", "pop_back");
+    rb_define_alias(rb_cDeque,  "shift", "pop_front");
+
     rb_define_method(rb_cDeque, "at", rb_deq_at, 1);
     rb_define_method(rb_cDeque, "[]=", rb_deq_at_write, 2);
     rb_define_alias(rb_cDeque,  "[]", "at");

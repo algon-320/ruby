@@ -90,6 +90,45 @@ class TestDeque < Test::Unit::TestCase
     assert_equal(100000, d.size)
   end
 
+  def test_pop_back
+    d = Deque.new
+    d.push_back(1)
+    d.push_back(2)
+    d.push_back(3)
+    assert_equal(3, d.pop_back)
+    assert_equal(2, d.size)
+    assert_equal(2, d.pop_back)
+    assert_equal(1, d.size)
+    assert_equal(1, d.pop_back)
+    assert_equal(0, d.size)
+
+    d = Deque.new(1000)
+    for i in 1..1000 do
+      d.pop_back
+    end
+    assert_equal(0, d.size)
+  end
+
+  def test_pop_front
+    d = Deque.new
+    d.push_back(1)
+    d.push_back(2)
+    d.push_back(3)
+    # >[1, 2, 3]<
+    assert_equal(1, d.pop_front)
+    assert_equal(2, d.size)
+    assert_equal(2, d.pop_front)
+    assert_equal(1, d.size)
+    assert_equal(3, d.pop_front)
+    assert_equal(0, d.size)
+
+    d = Deque.new(1000)
+    for i in 1..1000 do
+      d.pop_front
+    end
+    assert_equal(0, d.size)
+  end
+
   def test_at
     d = Deque.new(3, 123)
     assert_equal(123, d.at(0))
